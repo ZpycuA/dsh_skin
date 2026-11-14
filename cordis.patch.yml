@@ -1,0 +1,6 @@
+# dsh-praze-skin bundle patch layer.
+# 安装进 profile 后自动进入 bundle 图层（dsh plugin --profile <name> add <spec>）。
+# 以裸包名从 profile 的 node_modules 挂载宿主插件。
+- insert:
+    - id: praze-skin
+      name: dsh-praze-skin

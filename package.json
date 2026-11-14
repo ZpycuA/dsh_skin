@@ -1,0 +1,31 @@
+{
+  "name": "dsh-praze-skin",
+  "version": "1.0.0",
+  "description": "Praze 主题皮肤插件 for DeepSeek Harness：自定义背景 + Q版鲸鱼娘桌宠（余额/峰谷面板、触碰互动、对话）+ Astra 风格思考强度滑条（MAX 粒子爆发）+ P空间粒子/计划树特效。静态 Host 插件，无构建步骤。",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "client/",
+    "assets/",
+    "README.md",
+    "NOTICE.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh",
+    "skin",
+    "theme",
+    "pet",
+    "praze"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
