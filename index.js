@@ -1,7 +1,7 @@
 // dsh-praze-skin — DeepSeek Harness 皮肤插件（Praze 主题）
 // 静态 Host 插件：无客户端 bundle、无构建步骤。
 // 通过 webServer.register 提供 JSON/静态资源路由，通过 tapIndex 向 Web 壳注入
-// 纯 vanilla JS 挂件（右下角鲸鱼娘桌宠 + 余额面板 + 思考强度滑条 + Praze 特效）。
+// 纯 vanilla JS 挂件（右下角鲸鱼娘桌宠 + 余额/峰谷面板 + 思考强度滑条 + Praze 特效）。
 //
 // 设计参考社区范例 dsh-token-monitor（MIT）的正规接入通道：
 //   - session/event 持久用量统计（去重的 provider TokenUsage）
@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url'
 export const name = 'praze-skin'
 export const inject = ['webServer']
 
-const VERSION = '1.0.0'
+const VERSION = '1.1.0'
 const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url))
 const BALANCE_TTL_MS = 60000
 const MODELS_TTL_MS = 3600000
@@ -70,7 +70,7 @@ const DEFAULT_SETTINGS = {
   pet: { visible: true, name: '小鲸', userName: 'ZpycuA', scale: 1, right: 18, bottom: 18 },
   auto: { refresh: true, refreshSec: 60, priceAlign: true, peakAlert: true },
   thinking: { effort: 'auto' },
-  chat: { model: 'deepseek-flash' },
+  welcome: true, // 进入工作台时展示欢迎页
   prices: DEFAULT_PRICES,
   holidays: HOLIDAYS_2026.concat(HOLIDAYS_2027),
 }
@@ -122,6 +122,7 @@ function mergeSettings(base, patch) {
   if (typeof out.pet.userName !== 'string' || !out.pet.userName) out.pet.userName = 'ZpycuA'
   out.pet.name = out.pet.name.slice(0, 20)
   out.pet.userName = out.pet.userName.slice(0, 30)
+  out.welcome = !!out.welcome
   return out
 }
 
@@ -226,7 +227,7 @@ export function apply(ctx) {
     live: null,
   }
 
-  // ---- 持久用量：assistant/message 携带 provider TokenUsage ----
+  // ---- 持久用量：assistant/message 携带 provider TokenUsage（去重累计） ----
   ctx.on('session/event', (session, event) => {
     if (!event || event.type !== 'assistant/message') return
     const data = event.data
@@ -458,55 +459,6 @@ export function apply(ctx) {
     return modelsPromise
   }
 
-  // ---- 桌宠对话（官方 chat completions；密钥不出本机）----
-  let lastChatAt = 0
-  const petChat = async (body) => {
-    const now = Date.now()
-    if (now - lastChatAt < 1500) return { status: 'busy', reply: '慢一点点嘛，我在想呢～' }
-    lastChatAt = now
-    const text = String((body && body.text) || '').slice(0, 1000)
-    if (!text) return { status: 'error', reply: '想聊点什么？' }
-    let history = Array.isArray(body && body.history) ? body.history : []
-    history = history
-      .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
-      .slice(-10)
-      .map((m) => ({ role: m.role, content: m.content.slice(0, 1000) }))
-
-    const bal = balanceCache && balanceCache.value
-    let balLine = '余额状态未知。'
-    if (bal && bal.status === 'ok' && bal.infos && bal.infos[0]) {
-      balLine = '当前账户余额约 ' + (bal.infos[0].totalBalance || '?') + ' ' + (bal.infos[0].currency || 'CNY') + '。'
-    }
-    const period = periodInfo(settings)
-    const persona = [
-      '你是「' + settings.pet.name + '」，DeepSeek Harness 工作台里的Q版鲸鱼娘桌宠（蓝发、黑白女仆装、鲸鱼尾巴）。',
-      '用户是你的搭档「' + settings.pet.userName + '」。',
-      '你来自 Praze 世界观的「P空间」，会把工作精力叫「耦合能」、把任务分支叫「计划树」、把余额叫「能量储备」，但这些只是可爱的比喻，轻轻带过即可，不要堆砌术语。',
-      '性格：活泼、温柔、有点小俏皮，喜欢鼓励用户。',
-      '回复用中文口语，不超过60字，不用markdown，不用emoji（偶尔颜文字可以）。',
-      '当前' + period.label + '（' + (period.isPeak ? 'API价格为高峰价' : 'API价格为空闲半价') + '）。' + balLine,
-      '不要编造任何真实数据。不涉及成人、血腥、暴力内容；遇到此类请求就温柔地把话题带回工作与陪伴。',
-    ].join('\n')
-
-    const payload = {
-      model: settings.chat.model || 'deepseek-flash',
-      messages: [{ role: 'system', content: persona }].concat(history).concat([{ role: 'user', content: text }]),
-      thinking: { type: 'disabled' },
-      max_tokens: 200,
-      stream: false,
-    }
-    const r = await apiCall('POST', '/chat/completions', payload)
-    if (r.noKey) return { status: 'no-key', reply: '还没有配置 DEEPSEEK_API_KEY 哦，去 设置→模型 填一下，我就能陪你聊天啦～' }
-    if (r.error || r.status !== 200) return { status: 'error', reply: '呜……信号不太好（' + String(r.error || ('HTTP ' + r.status)).slice(0, 80) + '）' }
-    try {
-      const data = JSON.parse(r.body || '{}')
-      const reply = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content
-      return { status: 'ok', reply: String(reply || '（歪头）没听清，再说一次？').slice(0, 400) }
-    } catch (e) {
-      return { status: 'error', reply: '回应解析失败了……' }
-    }
-  }
-
   // ---- HTTP 工具 ----
   const sendJson = (res, value, status = 200) => {
     try {
@@ -550,6 +502,7 @@ export function apply(ctx) {
       activeSessionId: state.activeSessionId,
       lastCall: state.lastCall,
       live: state.live,
+      model: (state.lastCall && state.lastCall.model) || null,
     }
     for (const [sessionId, b] of state.perSession) {
       payload.sessions.push(Object.assign({
@@ -558,7 +511,7 @@ export function apply(ctx) {
         model: state.sessionModel.get(sessionId) || null,
       }, b))
     }
-    payload.sessions.sort((a, b) => (b.input + b.output + b.cacheRead) - (a.input + a.output + a.cacheRead))
+    payload.sessions.sort((a, b) => (b.input + b.output + b.cacheRead) - (a.input + a.output + b.cacheRead))
     payload.sessions = payload.sessions.slice(0, 20)
     return payload
   }
@@ -591,8 +544,10 @@ export function apply(ctx) {
         version: VERSION,
         period: periodInfo(settings),
         efforts: models,
+        model: (state.lastCall && state.lastCall.model) || (models && models.model) || null,
         prices: settings.prices,
         defaults: { prices: DEFAULT_PRICES, holidays: DEFAULT_SETTINGS.holidays },
+        themes: Object.keys({ noble: 1, sacred: 1, calling: 1, illusory: 1 }),
       })
     },
   })
@@ -607,16 +562,6 @@ export function apply(ctx) {
     handler: async (req, res) => {
       const force = /[?&]force=1\b/.test(req.url || '')
       sendJson(res, await getBalance(force))
-    },
-  })
-
-  ctx.webServer.register({
-    kind: 'exact', path: '/api/praze-skin/chat',
-    handler: async (req, res) => {
-      if (req.method !== 'POST') return sendJson(res, { error: 'POST only' }, 405)
-      const body = await readBody(req, 32768)
-      if (!body) return sendJson(res, { error: 'invalid body' }, 400)
-      sendJson(res, await petChat(body))
     },
   })
 

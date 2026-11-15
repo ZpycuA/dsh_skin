@@ -1,7 +1,7 @@
 {
   "name": "dsh-praze-skin",
-  "version": "1.0.0",
-  "description": "Praze 主题皮肤插件 for DeepSeek Harness：自定义背景 + Q版鲸鱼娘桌宠（余额/峰谷面板、触碰互动、对话）+ Astra 风格思考强度滑条（MAX 粒子爆发）+ P空间粒子/计划树特效。静态 Host 插件，无构建步骤。",
+  "version": "1.1.0",
+  "description": "Praze 主题皮肤插件 for DeepSeek Harness：自定义背景 + Q版鲸鱼娘桌宠（余额/峰谷面板、触碰互动、可拖可隐藏、互斥单浮层）+ Astra 风格思考强度滑条（档位吸附、MAX 粒子爆发）+ 模型展示与启动欢迎页 + P空间粒子/计划树特效。静态 Host 插件，无构建步骤。",
   "type": "module",
   "main": "index.js",
   "files": [
