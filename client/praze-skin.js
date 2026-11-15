@@ -1,6 +1,7 @@
 /* dsh-praze-skin — 客户端挂件（vanilla JS，无第三方依赖）
  * 右下角鲸鱼娘桌宠 + 余额/峰谷面板 + Astra 风格思考强度滑条 + Praze 特效。
  * 所有数据来自本机 Host 路由 /api/praze-skin/*；API 密钥不会到达浏览器。
+ * 面板互斥单开：默认只保留桌宠，点开一次只弹出一个浮层，不向上堆叠遮挡视野。
  */
 (function () {
   if (window.__dshPrazeSkin__) return
@@ -8,12 +9,11 @@
 
   var API = '/api/praze-skin'
   var settings = null, meta = null, usage = null, balance = null
-  var balanceBusy = false, collapsed = false, menuOpen = false
-  var chatHistory = [], patTimer = null, bubbleTimer = null
+  var balanceBusy = false, menuOpen = false, activePanel = null
   var prevPeak = null, rootEl = null, appRootEl = null, appRootOrig = null
   var particleCv = null, particleCtx = null, particles = [], rafId = null
   var burstCv = null, burstCtx = null, burstParts = [], burstRaf = null
-  var dark = true, lastPeriodKey = null
+  var dark = true
 
   var THEMES = {
     noble: { name: '崇高·蓝', color: '#4c8dff' },
@@ -21,7 +21,22 @@
     calling: { name: '感召·青', color: '#2fb7a6' },
     illusory: { name: '虚妄·紫', color: '#9a6cf0' }
   }
+  // 官方档位中文名
   var EFFORT_ZH = { auto: '跟随', none: '关闭', minimal: '极简', low: '轻度', medium: '标准', high: '深度', xhigh: '超深', max: 'MAX' }
+  // Astra（GPT-6 effort）风格别名
+  var EFFORT_ASTRA = { auto: 'Auto', none: 'Off', minimal: 'Minimal', low: 'Instant', medium: 'Medium', high: 'High', xhigh: 'Extra High', max: 'Pro' }
+  // Praze 耦合/借力档位副标题
+  var EFFORT_PRAZE = {
+    auto: '跟随会话默认耦合强度',
+    none: '不借力，不消耗耦合能',
+    minimal: '微量耦合，轻快回应',
+    low: '轻度借力，常规推演',
+    medium: '标准耦合，均衡输出',
+    high: '深度耦合，多步推理',
+    xhigh: '超深推演，长链分析',
+    max: '耦合能全开，计划树满枝'
+  }
+  var PANELS = ['pz-balance', 'pz-think', 'pz-settings', 'pz-usage']
   var PAT_LINES = [
     '嘿嘿，耦合能补充完毕～',
     '耳朵不可以随便捏啦……好吧只给你捏。',
@@ -49,11 +64,6 @@
     return (h > 0 ? h + ':' : '') + p(m) + ':' + p(ss)
   }
   function pick(arr) { return arr[Math.floor(Math.random() * arr.length)] }
-  function postSettings(patch) {
-    settings = deepMerge(settings, patch)
-    applyTheme()
-    fetch(API + '/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }).catch(function () {})
-  }
   function deepMerge(base, patch) {
     var out = JSON.parse(JSON.stringify(base || {}))
     for (var k in patch) {
@@ -61,6 +71,11 @@
       else out[k] = patch[k]
     }
     return out
+  }
+  function postSettings(patch) {
+    settings = deepMerge(settings, patch)
+    applyTheme()
+    fetch(API + '/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }).catch(function () {})
   }
   function reducedMotion() { return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches }
 
@@ -80,6 +95,15 @@
     document.documentElement.setAttribute('data-pz-focus', settings.focusMode ? '1' : '0')
   }
 
+  // ---------- 当前模型展示 ----------
+  function currentModel() {
+    if (usage && usage.live && usage.live.model) return usage.live.model
+    if (usage && usage.lastCall && usage.lastCall.model) return usage.lastCall.model
+    if (usage && usage.model) return usage.model
+    if (meta && meta.model) return meta.model
+    return null
+  }
+
   // ---------- 背景层 ----------
   function ensureBg() {
     var el = document.getElementById('pz-bg')
@@ -94,9 +118,16 @@
       window.addEventListener('resize', sizeParticleCanvas)
     }
     el.style.display = ''
-    el.querySelector('.pz-bg-img').style.backgroundImage = 'url(' + API + '/assets/background.png)'
+    var imgUrl = API + '/assets/background.png'
+    var bgImg = el.querySelector('.pz-bg-img')
+    bgImg.style.backgroundImage = 'url(' + imgUrl + ')'
     el.style.setProperty('--pz-veil', String(settings.bg.veil))
     document.documentElement.style.setProperty('--pz-veil', String(settings.bg.veil))
+    // 预加载：失败则回退到纯渐变背景，避免空白
+    var probe = new Image()
+    probe.onerror = function () { el.classList.add('fallback') }
+    probe.onload = function () { el.classList.remove('fallback') }
+    probe.src = imgUrl
     sizeParticleCanvas()
     makeAppTranslucent()
     if (settings.effects.particles && !reducedMotion()) startParticles(); else stopParticles()
@@ -225,11 +256,10 @@
     rootEl.innerHTML =
       '<div id="pz-bubble"></div>' +
       '<div id="pz-pill" class="hidden"></div>' +
-      '<div id="pz-balance" class="pz-card"></div>' +
-      '<div id="pz-think" class="pz-card"></div>' +
-      '<div id="pz-chat" class="pz-card pz-drawer hidden"></div>' +
-      '<div id="pz-settings" class="pz-card pz-drawer hidden"></div>' +
+      '<div id="pz-balance" class="pz-card pz-drawer hidden"></div>' +
+      '<div id="pz-think" class="pz-card pz-drawer hidden"></div>' +
       '<div id="pz-usage" class="pz-card pz-drawer hidden"></div>' +
+      '<div id="pz-settings" class="pz-card pz-drawer hidden"></div>' +
       '<div id="pz-pet">' +
       '  <div id="pz-menu" class="hidden"></div>' +
       '  <div id="pz-avatar-wrap"><div id="pz-ring"></div><img id="pz-avatar" alt="桌宠" draggable="false"><div id="pz-hearts"></div></div>' +
@@ -237,7 +267,14 @@
     document.body.appendChild(rootEl)
     positionRoot()
     renderBalance(); renderThink(); renderMenu(); renderAvatar()
-    bindAvatar(); bindDrag()
+    bindAvatarDrag()
+    // 点击挂件外部关闭所有浮层与菜单
+    document.addEventListener('click', function (e) {
+      if (rootEl && !rootEl.contains(e.target)) closeAll()
+    })
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') closeAll()
+    })
   }
   function positionRoot() {
     if (!rootEl || !settings) return
@@ -245,7 +282,26 @@
     rootEl.style.bottom = settings.pet.bottom + 'px'
     var scale = settings.pet.scale || 1
     var av = document.getElementById('pz-avatar-wrap')
-    if (av) { av.style.width = 96 * scale + 'px'; av.style.height = 96 * scale + 'px' }
+    if (av) { av.style.width = 92 * scale + 'px'; av.style.height = 92 * scale + 'px' }
+  }
+  function closeAll() {
+    menuOpen = false; activePanel = null
+    renderMenu()
+    PANELS.forEach(function (id) { var el = document.getElementById(id); if (el) el.classList.add('hidden') })
+  }
+  function openPanel(id) {
+    menuOpen = false; renderMenu()
+    PANELS.forEach(function (elId) {
+      var el = document.getElementById(elId)
+      if (!el) return
+      var on = elId === id
+      el.classList.toggle('hidden', !on)
+    })
+    activePanel = id
+    if (id === 'pz-balance') renderBalance()
+    else if (id === 'pz-think') renderThink()
+    else if (id === 'pz-usage') renderUsage()
+    else if (id === 'pz-settings') renderSettings()
   }
 
   // ---------- 余额面板 ----------
@@ -265,23 +321,14 @@
     if (balance.status === 'no-key') return { text: '未配置密钥', cls: 'pz-warn', sub: '设置→模型 填入 DEEPSEEK_API_KEY', dot: 'idle' }
     return { text: '查询失败', cls: 'pz-err', sub: balance.message || '', dot: 'bad' }
   }
+  function modelRowHtml() {
+    var m = currentModel()
+    if (!m) return ''
+    return '<div class="pz-model-row"><span class="pz-live-dot"></span><span>当前模型</span><span class="pz-model">' + esc(m) + '</span></div>'
+  }
   function renderBalance() {
     var card = document.getElementById('pz-balance')
     if (!card) return
-    if (collapsed) {
-      card.style.display = 'none'
-      var pill = document.getElementById('pz-pill')
-      var b = balanceMain()
-      var per = meta && meta.period
-      pill.classList.remove('hidden')
-      pill.innerHTML = '<span class="pz-dot ' + b.dot + '"></span><span class="pz-val">' + esc(b.text) + '</span>' +
-        (per ? '<span class="pz-muted">' + (per.isPeak ? '⚡峰' : '🌙闲') + '</span>' : '') +
-        '<span class="pz-muted">🐳</span>'
-      pill.onclick = function () { collapsed = false; renderBalance() }
-      return
-    }
-    card.style.display = ''
-    document.getElementById('pz-pill').classList.add('hidden')
     var b = balanceMain()
     var per = (meta && meta.period) || null
     var live = usage && usage.live
@@ -295,9 +342,10 @@
       '<span>能量储备 · 余额</span></span>' +
       '<span class="pz-spacer"></span>' +
       '<button class="pz-iconbtn" id="pz-refresh" title="刷新余额">' + (balanceBusy ? '…' : '⟳') + '</button>' +
-      '<button class="pz-iconbtn" id="pz-collapse" title="收起">—</button>' +
+      '<button class="pz-iconbtn" data-close title="收起">✕</button>' +
       '</div><div class="pz-body">'
-    h += '<div class="pz-row"><span class="pz-big pz-val ' + b.cls + '">' + esc(b.text) + '</span><span class="pz-dot ' + b.dot + '" style="margin-top:8px"></span></div>'
+    h += modelRowHtml()
+    h += '<div class="pz-row" style="margin-top:6px"><span class="pz-big pz-val ' + b.cls + '">' + esc(b.text) + '</span><span class="pz-dot ' + b.dot + '" style="margin-top:8px"></span></div>'
     if (b.sub) h += '<div class="pz-muted" style="font-size:11px">' + esc(b.sub) + '</div>'
     if (per) {
       h += '<div class="pz-row" style="margin-top:7px"><span class="pz-period ' + (per.isPeak ? 'peak' : 'off') + '">' +
@@ -320,10 +368,11 @@
       '</div>'
     h += '</div>'
     card.innerHTML = h
+    var closeBtn = card.querySelector('[data-close]')
+    if (closeBtn) closeBtn.onclick = closeAll
     document.getElementById('pz-refresh').onclick = function () { loadBalance(true) }
-    document.getElementById('pz-collapse').onclick = function () { collapsed = true; renderBalance() }
     document.getElementById('pz-topup').onclick = function () { window.open('https://platform.deepseek.com/usage', '_blank', 'noopener') }
-    document.getElementById('pz-usage-btn').onclick = function () { toggleDrawer('pz-usage'); renderUsage() }
+    document.getElementById('pz-usage-btn').onclick = function () { openPanel('pz-usage'); renderUsage() }
     var chips = card.querySelectorAll('[data-auto]')
     for (var j = 0; j < chips.length; j++) {
       chips[j].onclick = function () {
@@ -334,10 +383,9 @@
         if (k === 'refresh') restartBalancePoll()
       }
     }
-    bindDrag() // 面板重建后重新绑定拖动
   }
 
-  // ---------- 思考强度滑条 ----------
+  // ---------- 思考强度滑条（Astra effort 风格） ----------
   function effortStops() {
     var levels = (meta && meta.efforts && meta.efforts.levels) || [{ id: 'low' }, { id: 'medium' }, { id: 'high' }, { id: 'max' }]
     return [{ id: 'auto' }].concat(levels)
@@ -351,13 +399,16 @@
     for (var i = 0; i < stops.length; i++) if (stops[i].id === cur) idx = i
     var isMax = idx === stops.length - 1 && stops.length > 1
     var pct = stops.length > 1 ? idx / (stops.length - 1) * 100 : 0
-    var label = EFFORT_ZH[cur] || cur
+    var zh = EFFORT_ZH[cur] || cur
+    var astra = EFFORT_ASTRA[cur] || ''
+    var praze = EFFORT_PRAZE[cur] || ''
     var src = meta && meta.efforts && meta.efforts.source === 'api' ? '官方档位' : '备用档位'
     var h = '<div class="pz-head"><span class="pz-title">✦ 思考强度</span><span class="pz-spacer"></span>' +
       '<span class="pz-muted" style="font-size:10px;font-weight:400">' + src + '</span>' +
-      '<button class="pz-iconbtn" id="pz-think-toggle" title="收起/展开">▾</button></div>'
+      '<button class="pz-iconbtn" data-close title="收起">✕</button></div>'
     h += '<div class="pz-body" id="pz-think-body">' +
-      '<div class="pz-think-label"><span class="pz-muted">Prazing 输出档位</span><span class="pz-think-level">' + esc(label) + '</span></div>' +
+      modelRowHtml() +
+      '<div class="pz-think-label" style="margin-top:6px"><span class="pz-muted">Astra effort · 耦合强度</span><span class="pz-think-level">' + esc(zh) + (astra ? ' · ' + esc(astra) : '') + '</span></div>' +
       '<div class="pz-slider-wrap' + (isMax ? ' max' : '') + '" id="pz-slider-wrap">' +
       '<canvas id="pz-burst"></canvas>' +
       '<div class="pz-slider-track" id="pz-track"><div class="pz-slider-fill" style="width:' + pct + '%"></div>' +
@@ -365,24 +416,19 @@
       '<div class="pz-stops">'
     for (var s = 0; s < stops.length; s++) {
       var sp = stops.length > 1 ? s / (stops.length - 1) * 100 : 0
-      var zh = EFFORT_ZH[stops[s].id] || stops[s].id
-      h += '<span class="pz-stop' + (s === idx ? ' active' : '') + (s === stops.length - 1 ? ' maxstop' : '') + '" data-idx="' + s + '" style="left:' + sp + '%">' + esc(zh) + '</span>'
+      var label = EFFORT_ZH[stops[s].id] || stops[s].id
+      h += '<span class="pz-stop' + (s === idx ? ' active' : '') + (s === stops.length - 1 ? ' maxstop' : '') + '" data-idx="' + s + '" style="left:' + sp + '%">' + esc(label) + '</span>'
     }
     h += '</div></div>' +
+      '<div class="pz-think-sub" style="margin-top:2px">' + esc(praze) + '</div>' +
       '<div class="pz-muted" style="font-size:10px;margin-top:2px">' +
       (cur === 'auto' ? '跟随会话默认档位' : '下一次模型请求起生效 · reasoning_effort=' + esc(cur)) + '</div>' +
       '</div>'
     card.innerHTML = h
+    var closeBtn = card.querySelector('[data-close]')
+    if (closeBtn) closeBtn.onclick = closeAll
     burstCv = document.getElementById('pz-burst')
     burstCtx = burstCv.getContext('2d')
-    var body = document.getElementById('pz-think-body')
-    var hidden = false
-    document.getElementById('pz-think-toggle').onclick = function () {
-      hidden = !hidden
-      body.style.display = hidden ? 'none' : ''
-      this.textContent = hidden ? '▸' : '▾'
-    }
-    var wrap = document.getElementById('pz-slider-wrap')
     var track = document.getElementById('pz-track')
     var thumb = document.getElementById('pz-thumb')
     var setIdx = function (ni, fire) {
@@ -407,7 +453,8 @@
     var dragging = false
     thumb.addEventListener('pointerdown', function (e) { dragging = true; thumb.setPointerCapture(e.pointerId); e.preventDefault() })
     thumb.addEventListener('pointermove', function (e) { if (dragging) setIdx(fromEvent(e), false) })
-    thumb.addEventListener('pointerup', function (e) { if (dragging) { dragging = false; setIdx(fromEvent(e), true) } })
+    thumb.addEventListener('pointerup', function () { if (dragging) { dragging = false; setIdx(fromEvent(e), true) } })
+    thumb.addEventListener('pointercancel', function () { dragging = false })
     track.addEventListener('pointerdown', function (e) { setIdx(fromEvent(e), true) })
     thumb.addEventListener('keydown', function (e) {
       if (e.key === 'ArrowRight' || e.key === 'ArrowUp') { setIdx(idx + 1, true); e.preventDefault() }
@@ -424,12 +471,17 @@
     var img = document.getElementById('pz-avatar')
     if (img) img.src = API + '/assets/avatar.png'
     var pet = document.getElementById('pz-pet')
-    if (pet) pet.style.display = settings.pet.visible ? '' : 'none'
-    if (!settings.pet.visible) {
-      var pill = document.getElementById('pz-pill')
+    var pill = document.getElementById('pz-pill')
+    if (settings.pet.visible) {
+      if (pet) pet.style.display = ''
+      if (pill) pill.classList.add('hidden')
+      return
+    }
+    if (pet) pet.style.display = 'none'
+    if (pill) {
       pill.classList.remove('hidden')
       pill.innerHTML = '<span>🐳</span><span class="pz-muted">召唤' + esc(settings.pet.name) + '</span>'
-      pill.onclick = function () { postSettings({ pet: { visible: true } }); renderAvatar(); renderBalance() }
+      pill.onclick = function () { postSettings({ pet: { visible: true } }); renderAvatar() }
     }
   }
   function cheer() {
@@ -451,9 +503,37 @@
       setTimeout(function (el) { return function () { el.remove() } }(s), 1400)
     }
   }
-  function bindAvatar() {
+  function bindAvatarDrag() {
     var wrap = document.getElementById('pz-avatar-wrap')
-    wrap.addEventListener('click', function (e) {
+    if (!wrap) return
+    var sx = 0, sy = 0, sr = 0, sb = 0, moving = false, moved = false
+    wrap.addEventListener('pointerdown', function (e) {
+      if (e.button !== undefined && e.button !== 0) return
+      moving = true; moved = false
+      sx = e.clientX; sy = e.clientY
+      sr = settings.pet.right; sb = settings.pet.bottom
+      wrap.setPointerCapture(e.pointerId)
+      wrap.classList.add('dragging')
+      e.preventDefault()
+    })
+    wrap.addEventListener('pointermove', function (e) {
+      if (!moving) return
+      var dx = e.clientX - sx, dy = e.clientY - sy
+      if (!moved && Math.abs(dx) + Math.abs(dy) > 5) moved = true
+      if (!moved) return
+      var nr = Math.max(0, Math.min(window.innerWidth - 100, sr - dx))
+      var nb = Math.max(0, Math.min(window.innerHeight - 60, sb - dy))
+      rootEl.style.right = nr + 'px'; rootEl.style.bottom = nb + 'px'
+    })
+    wrap.addEventListener('pointerup', function (e) {
+      if (!moving) return
+      moving = false
+      wrap.classList.remove('dragging')
+      if (moved) {
+        postSettings({ pet: { right: parseInt(rootEl.style.right, 10) || 18, bottom: parseInt(rootEl.style.bottom, 10) || 18 } })
+        return
+      }
+      // 未拖动 → 点击：上半摸头，下半打开菜单
       var r = wrap.getBoundingClientRect()
       var y = (e.clientY - r.top) / r.height
       if (y < 0.45) {
@@ -465,17 +545,18 @@
         renderMenu()
       }
     })
+    wrap.addEventListener('pointercancel', function () { moving = false; wrap.classList.remove('dragging') })
   }
   function renderMenu() {
     var menu = document.getElementById('pz-menu')
     if (!menu) return
     menu.className = menuOpen ? '' : 'hidden'
-    menu.id = 'pz-menu'
     if (!menuOpen) { menu.innerHTML = ''; return }
     var items = [
-      ['💬 对话', function () { toggleDrawer('pz-chat'); renderChat() }],
-      ['⚙ 设置', function () { toggleDrawer('pz-settings'); renderSettings() }],
-      ['📊 用量', function () { toggleDrawer('pz-usage'); renderUsage() }],
+      ['💰 余额储备', function () { openPanel('pz-balance') }],
+      ['✦ 思考强度', function () { openPanel('pz-think') }],
+      ['📊 用量详情', function () { openPanel('pz-usage'); renderUsage() }],
+      ['⚙ 设置', function () { openPanel('pz-settings') }],
       ['🙈 隐藏桌宠', function () { postSettings({ pet: { visible: false } }); menuOpen = false; renderMenu(); renderAvatar() }]
     ]
     menu.innerHTML = ''
@@ -487,30 +568,6 @@
       menu.appendChild(b)
     }
   }
-  function bindDrag() {
-    var head = document.getElementById('pz-balance-head')
-    if (!head) return
-    head.style.cursor = 'move'
-    var sx = 0, sy = 0, sr = 0, sb = 0, moving = false
-    head.addEventListener('pointerdown', function (e) {
-      if (e.target.closest('button')) return
-      moving = true; sx = e.clientX; sy = e.clientY
-      sr = settings.pet.right; sb = settings.pet.bottom
-      head.setPointerCapture(e.pointerId)
-      e.preventDefault()
-    })
-    head.addEventListener('pointermove', function (e) {
-      if (!moving) return
-      var nr = Math.max(0, Math.min(window.innerWidth - 100, sr - (e.clientX - sx)))
-      var nb = Math.max(0, Math.min(window.innerHeight - 60, sb - (e.clientY - sy)))
-      rootEl.style.right = nr + 'px'; rootEl.style.bottom = nb + 'px'
-    })
-    head.addEventListener('pointerup', function () {
-      if (!moving) return
-      moving = false
-      postSettings({ pet: { right: parseInt(rootEl.style.right, 10) || 18, bottom: parseInt(rootEl.style.bottom, 10) || 18 } })
-    })
-  }
 
   // ---------- 气泡 ----------
   function say(text, ms) {
@@ -518,85 +575,21 @@
     if (!b) return
     b.textContent = text
     b.classList.add('show')
-    if (bubbleTimer) clearTimeout(bubbleTimer)
-    bubbleTimer = setTimeout(function () { b.classList.remove('show') }, ms || 4200)
-  }
-
-  // ---------- 抽屉 ----------
-  function toggleDrawer(id) {
-    var ids = ['pz-chat', 'pz-settings', 'pz-usage']
-    for (var i = 0; i < ids.length; i++) {
-      var el = document.getElementById(ids[i])
-      if (!el) continue
-      if (ids[i] === id) el.classList.toggle('hidden')
-      else el.classList.add('hidden')
-    }
-  }
-  function drawerHead(title, id) {
-    return '<div class="pz-head"><span class="pz-title">' + title + '</span><span class="pz-spacer"></span>' +
-      '<button class="pz-iconbtn" data-close="' + id + '">✕</button></div>'
-  }
-  function bindClose(el) {
-    var b = el.querySelector('[data-close]')
-    if (b) b.onclick = function () { el.classList.add('hidden') }
-  }
-
-  // ---------- 对话 ----------
-  function renderChat() {
-    var el = document.getElementById('pz-chat')
-    if (!el) return
-    el.innerHTML = drawerHead('💬 和' + esc(settings.pet.name) + '聊天', 'pz-chat') +
-      '<div class="pz-body"><div id="pz-chat-msgs"></div></div>' +
-      '<div class="pz-chat-input"><input id="pz-chat-text" type="text" maxlength="500" placeholder="和我说点什么…（回车发送）">' +
-      '<button class="pz-btn primary" id="pz-chat-send">发送</button></div>'
-    bindClose(el)
-    var msgs = document.getElementById('pz-chat-msgs')
-    if (!chatHistory.length) {
-      appendMsg('pet', '（从P空间探出头）' + settings.pet.userName + '，想聊点什么？工作累了也可以摸摸我的头哦～')
-    } else {
-      for (var i = 0; i < chatHistory.length; i++) appendMsg(chatHistory[i].role === 'user' ? 'user' : 'pet', chatHistory[i].content, true)
-    }
-    var send = function () {
-      var input = document.getElementById('pz-chat-text')
-      var text = (input.value || '').trim()
-      if (!text) return
-      input.value = ''
-      appendMsg('user', text)
-      chatHistory.push({ role: 'user', content: text })
-      var typing = document.createElement('div')
-      typing.className = 'pz-msg pet'
-      typing.innerHTML = '<span class="pz-typing"><i></i><i></i><i></i></span>'
-      msgs.appendChild(typing); msgs.scrollTop = msgs.scrollHeight
-      fetch(API + '/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: text, history: chatHistory.slice(0, -1) }) })
-        .then(function (r) { return r.json() })
-        .then(function (v) {
-          typing.remove()
-          var reply = v.reply || '……'
-          appendMsg('pet', reply)
-          chatHistory.push({ role: 'assistant', content: reply })
-          if (chatHistory.length > 20) chatHistory = chatHistory.slice(-20)
-        })
-        .catch(function () { typing.remove(); appendMsg('pet', '连接 Host 失败了……重启 dsh 试试？') })
-    }
-    document.getElementById('pz-chat-send').onclick = send
-    document.getElementById('pz-chat-text').addEventListener('keydown', function (e) { if (e.key === 'Enter') send() })
-    function appendMsg(who, text, noScroll) {
-      var d = document.createElement('div')
-      d.className = 'pz-msg ' + who
-      d.textContent = text
-      msgs.appendChild(d)
-      if (!noScroll) msgs.scrollTop = msgs.scrollHeight
-    }
+    if (b._timer) clearTimeout(b._timer)
+    b._timer = setTimeout(function () { b.classList.remove('show') }, ms || 4200)
   }
 
   // ---------- 用量详情 ----------
   function renderUsage() {
     var el = document.getElementById('pz-usage')
     if (!el) return
-    var h = drawerHead('📊 用量与费用估算', 'pz-usage') + '<div class="pz-body">'
+    var h = '<div class="pz-head"><span class="pz-title">📊 用量与费用估算</span><span class="pz-spacer"></span><button class="pz-iconbtn" data-close>✕</button></div><div class="pz-body">'
+    var closeBtn = el.querySelector('[data-close]')
     if (!usage) { h += '<div class="pz-muted">加载中…</div>' }
     else {
       var t = usage.total, c = usage.cost || {}
+      var m = currentModel()
+      if (m) h += '<div class="pz-model-row"><span class="pz-live-dot"></span><span>当前模型</span><span class="pz-model">' + esc(m) + '</span></div>'
       h += '<div class="pz-sec-title">全部会话（本次运行）</div>'
       h += '<div class="pz-row pz-val"><span>输入 ' + fmt(t.input) + ' · 输出 ' + fmt(t.output) + '</span><span>缓存 ' + fmt(t.cacheRead) + '</span></div>'
       h += '<div class="pz-row pz-val"><span>调用 ' + t.calls + ' 次' + (t.reasoning ? ' · 推理 ' + fmt(t.reasoning) : '') + '</span><span class="pz-accent">累计 ≈ ' + money(c.total) + '</span></div>'
@@ -611,7 +604,8 @@
     }
     h += '</div>'
     el.innerHTML = h
-    bindClose(el)
+    var cb = el.querySelector('[data-close]')
+    if (cb) cb.onclick = closeAll
   }
 
   // ---------- 设置 ----------
@@ -620,11 +614,11 @@
     var el = document.getElementById('pz-settings')
     if (!el) return
     var tabs = [['look', '外观'], ['fx', '特效'], ['pet', '桌宠'], ['price', '价格'], ['about', '关于']]
-    var h = drawerHead('⚙ 插件设置', 'pz-settings') + '<div class="pz-tabs">'
+    var h = '<div class="pz-head"><span class="pz-title">⚙ 插件设置</span><span class="pz-spacer"></span><button class="pz-iconbtn" data-close>✕</button></div><div class="pz-tabs">'
     for (var i = 0; i < tabs.length; i++) h += '<span class="pz-tab' + (settingsTab === tabs[i][0] ? ' active' : '') + '" data-tab="' + tabs[i][0] + '">' + tabs[i][1] + '</span>'
     h += '</div><div class="pz-body" id="pz-set-body"></div>'
     el.innerHTML = h
-    bindClose(el)
+    var cb = el.querySelector('[data-close]'); if (cb) cb.onclick = closeAll
     var tabEls = el.querySelectorAll('.pz-tab')
     for (var j = 0; j < tabEls.length; j++) tabEls[j].onclick = function () { settingsTab = this.getAttribute('data-tab'); renderSettings() }
     var body = document.getElementById('pz-set-body')
@@ -654,6 +648,7 @@
     body.appendChild(rangeRow('背景透出程度 ' + Math.round(settings.bg.show * 100) + '%', settings.bg.show, 0, 0.85, 0.01, function (v) { postSettings({ bg: { show: v } }); ensureBg() }))
     body.appendChild(rangeRow('背景柔化纱罩 ' + Math.round(settings.bg.veil * 100) + '%', settings.bg.veil, 0, 0.9, 0.01, function (v) { postSettings({ bg: { veil: v } }); ensureBg() }))
     body.appendChild(checkRow('专注模式（隐藏背景与全部特效）', settings.focusMode, function (v) { postSettings({ focusMode: v }); ensureBg(); applyTheme() }))
+    body.appendChild(checkRow('进入工作台时显示欢迎页', !!settings.welcome, function (v) { postSettings({ welcome: v }) }))
     var t = document.createElement('div'); t.className = 'pz-field'
     var l = document.createElement('label'); l.textContent = '投射主题（Praze 四象限）'
     t.appendChild(l)
@@ -739,7 +734,7 @@
     body.appendChild(rb)
   }
   function renderAbout(body) {
-    var h = '<div class="pz-sec-title">dsh-praze-skin v' + (meta ? meta.version : '1.0.0') + '</div>' +
+    var h = '<div class="pz-sec-title">dsh-praze-skin v' + (meta ? meta.version : '1.1.0') + '</div>' +
       '<div class="pz-muted" style="font-size:11px">Praze 主题皮肤插件：背景、鲸鱼娘桌宠、余额/峰谷面板、思考强度滑条与 P空间特效。非官方社区插件，与深度求索无隶属关系。</div>' +
       '<div class="pz-sec-title">开源与素材署名</div>' +
       '<div class="pz-muted" style="font-size:11px">' +
@@ -756,6 +751,46 @@
       '<a href="https://zpycua.github.io/Praze_Site/" target="_blank" rel="noopener" style="color:var(--pz-accent)">Praze 设定集</a> · ' +
       '<a href="https://api-docs.deepseek.com/zh-cn/quick_start/pricing" target="_blank" rel="noopener" style="color:var(--pz-accent)">官方价格</a></div>'
     body.innerHTML = h
+  }
+
+  // ---------- 欢迎页 ----------
+  function ensureWelcome() {
+    var w = document.getElementById('pz-welcome')
+    if (w) return w
+    w = document.createElement('div')
+    w.id = 'pz-welcome'
+    document.body.appendChild(w)
+    return w
+  }
+  function showWelcome() {
+    if (!settings.welcome) return
+    var w = ensureWelcome()
+    var m = currentModel()
+    var eff = settings.thinking.effort || 'auto'
+    var effZh = EFFORT_ZH[eff] || eff
+    var b = balanceMain()
+    var per = meta && meta.period
+    var theme = THEMES[settings.theme] || THEMES.noble
+    w.innerHTML =
+      '<div class="pz-w-card">' +
+      '<div class="pz-w-mark"><svg width="30" height="30" viewBox="0 0 24 24" fill="none"><path d="M12 3l7.5 4.3v8.6L12 20.2 4.5 15.9V7.3L12 3z" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/><path d="M12 8l3 1.7v3.4l-3 1.7-3-1.7V9.7L12 8z" fill="#fff" opacity=".85"/></svg></div>' +
+      '<div class="pz-w-title">Praze Skin</div>' +
+      '<div class="pz-w-sub">Praze 主题 · DeepSeek Harness 皮肤插件 v' + (meta ? meta.version : '1.1.0') + '</div>' +
+      '<div class="pz-w-meta">' +
+      '<div class="pz-row"><span class="pz-muted">投射主题</span><b>' + esc(theme.name) + '</b></div>' +
+      '<div class="pz-row"><span class="pz-muted">当前模型</span><b>' + (m ? esc(m) : '未接入') + '</b></div>' +
+      '<div class="pz-row"><span class="pz-muted">思考强度</span><b>' + esc(effZh) + '</b></div>' +
+      '<div class="pz-row"><span class="pz-muted">能量储备</span><b class="' + b.cls + '">' + esc(b.text) + '</b></div>' +
+      (per ? '<div class="pz-row"><span class="pz-muted">峰谷状态</span><b>' + esc(per.label) + '</b></div>' : '') +
+      '</div>' +
+      '<div class="pz-w-actions"><button class="pz-btn primary" id="pz-w-enter">进入工作台</button></div>' +
+      '</div>'
+    w.classList.add('show')
+    var enter = function () { w.classList.remove('show') }
+    w.querySelector('#pz-w-enter').onclick = enter
+    w.addEventListener('click', function (e) { if (e.target === w) enter() })
+    // 3.2s 后自动进入（不强制停留）
+    setTimeout(function () { w.classList.remove('show') }, 3200)
   }
 
   // ---------- 数据轮询 ----------
@@ -818,10 +853,11 @@
         var cd = document.getElementById('pz-countdown')
         if (cd && meta && meta.period && meta.period.nextChangeAt) cd.textContent = countdown(meta.period.nextChangeAt) + ' 后切换'
       }, 5000)
+      showWelcome()
       setTimeout(function () {
         var g = pick(GREET_LINES).replace('{name}', settings.pet.name).replace('{user}', settings.pet.userName)
         say(g, 5200)
-      }, 1200)
+      }, 1400)
     }).catch(function () {
       // Host 未就绪时静默重试
       setTimeout(boot, 3000)
