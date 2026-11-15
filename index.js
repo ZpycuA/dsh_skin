@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url'
 export const name = 'praze-skin'
 export const inject = ['webServer']
 
-const VERSION = '1.1.0'
+const VERSION = '1.2.0'
 const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url))
 const BALANCE_TTL_MS = 60000
 const MODELS_TTL_MS = 3600000
