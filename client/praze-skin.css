@@ -180,7 +180,7 @@ html[data-pz-dark="0"] #pz-bg .pz-bg-veil { background: rgba(248, 250, 255, var(
 
 /* ---------- 桌宠 ---------- */
 #pz-pet { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
-#pz-avatar-wrap { position: relative; width: 92px; height: 92px; cursor: grab; user-select: none; touch-action: none; }
+#pz-avatar-wrap { position: relative; z-index: 1; width: 92px; height: 92px; cursor: grab; user-select: none; touch-action: none; }
 #pz-avatar-wrap.dragging { cursor: grabbing; }
 #pz-avatar {
   width: 100%; height: 100%; object-fit: contain; display: block;
@@ -222,7 +222,7 @@ html[data-pz-dark="0"] #pz-bg .pz-bg-veil { background: rgba(248, 250, 255, var(
 #pz-bubble.show { opacity: 1; transform: translateY(0); }
 
 /* 发散菜单 */
-#pz-menu { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+#pz-menu { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; position: relative; z-index: 2; }
 #pz-menu.hidden { display: none; }
 .pz-menu-btn {
   display: flex; align-items: center; gap: 6px; padding: 6px 13px; border-radius: 999px;

@@ -11,6 +11,7 @@
   var settings = null, meta = null, usage = null, balance = null
   var balanceBusy = false, menuOpen = false, activePanel = null
   var prevPeak = null, rootEl = null, appRootEl = null, appRootOrig = null
+  var translucentChain = []
   var particleCv = null, particleCtx = null, particles = [], rafId = null
   var burstCv = null, burstCtx = null, burstParts = [], burstRaf = null
   var dark = true
@@ -107,7 +108,7 @@
   // ---------- 背景层 ----------
   function ensureBg() {
     var el = document.getElementById('pz-bg')
-    if (!settings.bg.enabled || settings.focusMode) { if (el) el.style.display = 'none'; restoreAppRoot(); stopParticles(); return }
+    if (!settings.bg.enabled || settings.focusMode) { if (el) el.style.display = 'none'; restoreAppRoot(); stopParticles(); document.body.style.backgroundImage = ''; return }
     if (!el) {
       el = document.createElement('div')
       el.id = 'pz-bg'
@@ -125,43 +126,74 @@
     document.documentElement.style.setProperty('--pz-veil', String(settings.bg.veil))
     // 预加载：失败则回退到纯渐变背景，避免空白
     var probe = new Image()
-    probe.onerror = function () { el.classList.add('fallback') }
-    probe.onload = function () { el.classList.remove('fallback') }
+    probe.onerror = function () {
+      el.classList.add('fallback')
+      document.body.style.backgroundImage = ''
+    }
+    probe.onload = function () {
+      el.classList.remove('fallback')
+      // body 底层兜底：宿主容器透明化后作为最底层叠底
+      document.body.style.backgroundImage = 'url(' + imgUrl + ')'
+      document.body.style.backgroundSize = 'cover'
+      document.body.style.backgroundPosition = 'center'
+      document.body.style.backgroundRepeat = 'no-repeat'
+    }
     probe.src = imgUrl
     sizeParticleCanvas()
     makeAppTranslucent()
     if (settings.effects.particles && !reducedMotion()) startParticles(); else stopParticles()
   }
-  function findAppRoot() {
-    var c = document.getElementById('root') || document.getElementById('app')
-    if (c) return c
+  function findAppRoots() {
+    var out = []
+    var ids = ['root', 'app', '__next', 'dsh-root', 'dsh-app', 'main']
+    for (var t = 0; t < ids.length; t++) {
+      var byId = document.getElementById(ids[t])
+      if (byId && out.indexOf(byId) === -1) out.push(byId)
+    }
     var kids = document.body.children
     for (var i = 0; i < kids.length; i++) {
       var k = kids[i]
       if (k.id && k.id.indexOf('pz-') === 0) continue
-      if (k.tagName === 'SCRIPT' || k.tagName === 'STYLE' || k.tagName === 'LINK') continue
+      if (/^(SCRIPT|STYLE|LINK|TEMPLATE)$/.test(k.tagName)) continue
       var r = k.getBoundingClientRect()
-      if (r.width >= window.innerWidth * 0.8 && r.height >= window.innerHeight * 0.8) return k
+      if (r.width >= window.innerWidth * 0.8 && r.height >= window.innerHeight * 0.8 && out.indexOf(k) === -1) out.push(k)
     }
-    return null
+    return out
   }
-  function makeAppTranslucent() {
-    // 只处理最外层应用容器：把其不透明底色变为半透明，让背景图透出；
-    // 内部卡片/消息气泡保持原样，保证文字阅读不受影响。
-    var root = findAppRoot()
-    if (!root) return
-    if (root !== appRootEl) { appRootEl = root; appRootOrig = root.style.backgroundColor || '' }
+  function applyTranslucent(el) {
     try {
-      var cs = getComputedStyle(root)
+      var cs = getComputedStyle(el)
       var m = cs.backgroundColor.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/)
       if (!m) return
       var alpha = m[4] == null ? 1 : +m[4]
       if (alpha < 0.99) return // 已经透明则不干预
       var target = Math.max(0.15, 1 - settings.bg.show)
-      root.style.backgroundColor = 'rgba(' + m[1] + ',' + m[2] + ',' + m[3] + ',' + target + ')'
+      translucentChain.push({ el: el, orig: el.style.backgroundColor || '' })
+      el.style.backgroundColor = 'rgba(' + m[1] + ',' + m[2] + ',' + m[3] + ',' + target + ')'
     } catch (e) {}
   }
+  function makeAppTranslucent() {
+    // 只处理全屏宿主容器：把其不透明底色变为半透明，让背景图透出；
+    // 内部卡片/消息气泡保持原样，保证文字阅读不受影响。
+    restoreAppRoot()
+    var roots = findAppRoots()
+    for (var i = 0; i < roots.length; i++) {
+      applyTranslucent(roots[i])
+      // 下钻一层：若外层容器背景透明，定位内部铺满视口的不透明布局容器
+      var kids = roots[i].children
+      for (var j = 0; j < kids.length; j++) {
+        var k = kids[j]
+        if (k.id && k.id.indexOf('pz-') === 0) continue
+        var r = k.getBoundingClientRect()
+        if (r.width >= window.innerWidth * 0.8 && r.height >= window.innerHeight * 0.8) applyTranslucent(k)
+      }
+    }
+  }
   function restoreAppRoot() {
+    for (var i = 0; i < translucentChain.length; i++) {
+      try { translucentChain[i].el.style.backgroundColor = translucentChain[i].orig } catch (e) {}
+    }
+    translucentChain = []
     if (appRootEl) { try { appRootEl.style.backgroundColor = appRootOrig } catch (e) {} }
   }
 
@@ -268,9 +300,14 @@
     positionRoot()
     renderBalance(); renderThink(); renderMenu(); renderAvatar()
     bindAvatarDrag()
+    // 挂件内部点击不外泄到 document：菜单回调会清空菜单 DOM，
+    // 若冒泡到外部关闭判断，已脱离文档的按钮会被误判为“点在挂件外”而关掉刚打开的面板。
+    rootEl.addEventListener('click', function (e) { e.stopPropagation() })
     // 点击挂件外部关闭所有浮层与菜单
     document.addEventListener('click', function (e) {
-      if (rootEl && !rootEl.contains(e.target)) closeAll()
+      if (!rootEl) return
+      if (!e.target || !document.contains(e.target)) return // 节点已被挂件回调移除，按内部操作处理
+      if (!rootEl.contains(e.target)) closeAll()
     })
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape') closeAll()
@@ -506,18 +543,17 @@
   function bindAvatarDrag() {
     var wrap = document.getElementById('pz-avatar-wrap')
     if (!wrap) return
-    var sx = 0, sy = 0, sr = 0, sb = 0, moving = false, moved = false
+    var sx = 0, sy = 0, sr = 0, sb = 0, dragging = false, moved = false
     wrap.addEventListener('pointerdown', function (e) {
       if (e.button !== undefined && e.button !== 0) return
-      moving = true; moved = false
+      dragging = true; moved = false
       sx = e.clientX; sy = e.clientY
       sr = settings.pet.right; sb = settings.pet.bottom
-      wrap.setPointerCapture(e.pointerId)
+      try { wrap.setPointerCapture(e.pointerId) } catch (err) {}
       wrap.classList.add('dragging')
-      e.preventDefault()
     })
     wrap.addEventListener('pointermove', function (e) {
-      if (!moving) return
+      if (!dragging) return
       var dx = e.clientX - sx, dy = e.clientY - sy
       if (!moved && Math.abs(dx) + Math.abs(dy) > 5) moved = true
       if (!moved) return
@@ -525,15 +561,22 @@
       var nb = Math.max(0, Math.min(window.innerHeight - 60, sb - dy))
       rootEl.style.right = nr + 'px'; rootEl.style.bottom = nb + 'px'
     })
-    wrap.addEventListener('pointerup', function (e) {
-      if (!moving) return
-      moving = false
+    function endDrag() {
+      if (!dragging) return
+      dragging = false
       wrap.classList.remove('dragging')
+    }
+    wrap.addEventListener('pointerup', function () {
       if (moved) {
         postSettings({ pet: { right: parseInt(rootEl.style.right, 10) || 18, bottom: parseInt(rootEl.style.bottom, 10) || 18 } })
-        return
       }
-      // 未拖动 → 点击：上半摸头，下半打开菜单
+      endDrag()
+    })
+    wrap.addEventListener('pointercancel', endDrag)
+    // 点击（非拖动）：上半摸头，下半开关菜单。点击判定放在 click 阶段，
+    // 与拖动分离，避免 pointer capture 的事件重定向把点击误判成拖拽/摸头。
+    wrap.addEventListener('click', function (e) {
+      if (moved) { moved = false; return }
       var r = wrap.getBoundingClientRect()
       var y = (e.clientY - r.top) / r.height
       if (y < 0.45) {
@@ -545,7 +588,6 @@
         renderMenu()
       }
     })
-    wrap.addEventListener('pointercancel', function () { moving = false; wrap.classList.remove('dragging') })
   }
   function renderMenu() {
     var menu = document.getElementById('pz-menu')
